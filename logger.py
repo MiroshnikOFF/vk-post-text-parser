@@ -1,3 +1,10 @@
+import abc
+import datetime
+import logging
+import os
+import pathlib
+
+from config import AppConfig
 
 
 class Logger(abc.ABC):
@@ -22,12 +29,11 @@ class Logger(abc.ABC):
         pass
 
     @property
-    @abc.abstractmethod
     def log_file(self):
         """
         Свойство, возвращает наименование файла для логирования
         """
-        pass
+        return f"{datetime.datetime.now().strftime('%Y_%m_%d__%H_%M_%S')}.log"
 
     file_format = '%(asctime)-5s %(name)-15s %(levelname)-8s %(message)s'
     console_format = '%(asctime)-5s %(name)-15s %(levelname)-8s %(message)s'
@@ -120,35 +126,42 @@ class Logger(abc.ABC):
         self._logger.error(*args, **kwargs)
 
 
-class CalculationLogger(Logger):
+class ManagerLogger(Logger):
     """
-    Обеспечивает логирование на уровне расчета
+    Обеспечивает логирование на уровне менеджера
     """
-
-    def __init__(self, calculation_id: int):
-        """
-        Сохраняет ID расчета и инициализирует класс логирования
-        """
-        self.calculation_id = calculation_id
-        super(CalculationLogger, self).__init__()
 
     @property
     def logger_name(self):
         """
         Свойство, возвращает имя для логирования
         """
-        return f'calculation_{self.calculation_id}'
+        return 'manage_log'
 
     @property
     def log_folder(self):
         """
         Свойство, возвращает каталог для логирования
         """
-        return AppConfig.get_log_dir() + os.sep + 'log' + os.sep + 'calculation'
+        return AppConfig.get_log_dir() + os.sep + 'log' + os.sep + 'manager'
+
+
+class ParserLogger(Logger):
+    """
+    Обеспечивает логирование на уровне парсера
+    """
 
     @property
-    def log_file(self):
+    def logger_name(self):
         """
-        Свойство, возвращает наименование файла для логирования
+        Свойство, возвращает имя для логирования
         """
-        return f"{self.calculation_id}-{datetime.datetime.now().strftime('%Y_%m_%d__%H_%M_%S')}.log"
+        return 'parser_log'
+
+    @property
+    def log_folder(self):
+        """
+        Свойство, возвращает каталог для логирования
+        """
+        return AppConfig.get_log_dir() + os.sep + 'log' + os.sep + 'parser'
+

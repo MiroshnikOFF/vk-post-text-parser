@@ -1,11 +1,13 @@
 from datetime import datetime
 from queue import Queue
+import asyncio
 from time import sleep
 from threading import Thread
 
 from config import AppConfig
 from models import Base, Query, Owner, Post, Link, Photo, Video
 from executors import SearchOwner, ApiParser, DataExecutor
+from logger import ManagerLogger
 
 
 class AppManager:
@@ -14,7 +16,7 @@ class AppManager:
     """
 
     def __init__(self, api_v: str, token: str, user_ids: list, group_ids: list, query: str):
-
+        self.logger = ManagerLogger()
         self.queue = Queue()
         self.parser = ApiParser(api_v, token, query, self.queue)
         self.executor = DataExecutor()
@@ -50,11 +52,10 @@ class AppManager:
 
         iter_cnt = 1
         while self.parser.active_owners > 0:
-            print(f"{iter_cnt=}")
-            self.parser.search_owner_wall(100, _offset)
+            self.logger.info(f'\n\nIter: {iter_cnt}  Active owners: {self.parser.active_owners}\n')
+            asyncio.run(self.parser.search_owner_wall(100, _offset))
             _offset += 100
             iter_cnt += 1
-            print()
 
     def listen_queue(self, stop_date=None):
         while self.parser.active_owners > 0:
@@ -69,8 +70,7 @@ class AppManager:
 
         """
         self.owners = self.parser.create_owners(self.user_ids, self.group_ids)
-        print('search_owners: ', len(self.parser.search_owners))
-        print(self.parser.search_owners)
+        self.logger.info(f'Search owners: {len(self.parser.search_owners)}')
         Thread(target=self.parser_thread).start()
         self.listen_queue()
 
@@ -79,6 +79,7 @@ class AppManager:
         #     print(wall)
         # for owner in self.parser.search_owners:
         #     print(owner)
+
         self.export_result()
 
 

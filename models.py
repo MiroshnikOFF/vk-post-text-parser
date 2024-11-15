@@ -1,14 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, create_engine
+from sqlalchemy import ForeignKey
 from sqlalchemy.orm import Session, sessionmaker, DeclarativeBase, Mapped, mapped_column, relationship
-
-
-# from config import AppConfig
-# __con_str = (f'{AppConfig.get_base_provider_name()}:/'
-#              f'/{AppConfig.get_user_id()}:{AppConfig.get_user_pwd()}@{AppConfig.get_db_host()}:'
-#              f'{AppConfig.get_db_port()}/{AppConfig.get_db_name()}')
-# engine = create_engine(__con_str, echo=True)
 
 
 class Base(DeclarativeBase):
@@ -92,7 +85,3 @@ class Video(Base):
     owner_id: Mapped[int]
     post: Mapped['Post'] = relationship(back_populates='videos', uselist=False)
     post_id: Mapped[int] = mapped_column(ForeignKey('tPosts.id'))
-
-#
-# Base.metadata.drop_all(engine)
-# Base.metadata.create_all(engine)

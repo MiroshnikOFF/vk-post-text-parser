@@ -2,6 +2,7 @@ from datetime import datetime
 from queue import Queue
 from threading import Thread, Lock
 import asyncio
+import aiohttp
 
 from vk_api.exceptions import VkApiError
 import vk_api
@@ -10,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 from config import AppConfig
 from models import Query, Owner, Post, Link, Photo, Video
+from logger import ParserLogger
 
 
 class SearchOwner:
@@ -22,7 +24,7 @@ class SearchOwner:
         self.is_active = True
 
     def __repr__(self):
-        return f'Owner: {self.id}_{self.domain}. Is activ: {self.is_active}'
+        return f'Owner: {self.id}_{self.domain}'
 
 
 class ApiParser:
@@ -31,10 +33,18 @@ class ApiParser:
     """
 
     def __init__(self, version: str, token: str, query: str, queue: Queue):
+        self.logger = ParserLogger()
         self.domain = 'https://vk.com/'
+        self.api_url = 'https://api.vk.com/method/wall.search'
+        self.headers = self.get_headers()
         self.queue = queue
         self.lock = Lock()
+
+        self.version = version
+        self.token = token
+
         self.api = vk_api.VkApi(token=token, api_version=version)
+
         self.loader = DataExecutor()
         self.query = query
         self.query_id = self.loader.get_query_id(self.query)
@@ -47,6 +57,17 @@ class ApiParser:
         self.ext_user_ids = []
         self.ext_group_ids = []
         self.ext_posts = []
+
+    @staticmethod
+    def get_headers():
+        """
+
+        """
+        headers = {
+            'Authorization': 'Bearer ' + AppConfig.get_vk_access_token(),
+            'Content-Type': 'multipart/form-data'
+        }
+        return headers
 
     @staticmethod
     def convert_list_to_str(source: list) -> str:
@@ -76,8 +97,7 @@ class ApiParser:
                 return True
         return False
 
-    @staticmethod
-    def get_error_message(owner: dict, owner_type: str, exists: bool) -> None:
+    def get_error_message(self, owner: dict, owner_type: str, exists: bool) -> None:
         """
 
         """
@@ -87,7 +107,7 @@ class ApiParser:
         message = message + ' already exists.' if exists else message
         message = message + ' is closed.' if bool(owner['is_closed']) else message
         message = message + f' deactivated: {deactivated}' if deactivated is not None else message
-        print(message)
+        self.logger.info(message)
 
     def create_users(self, user_ids: list) -> list[Owner]:
         """
@@ -152,43 +172,41 @@ class ApiParser:
                 self.active_owners += 1
         return group_obj_list
 
-    def search_owner_posts(self, owner: SearchOwner, count: int, offset: int) -> None:
+    async def search_owner_posts(self, owner: SearchOwner, count: int, offset: int) -> None:
         """
 
         """
         try:
-            print()
-            print(f"search_owner_posts: {owner}")
-            wall_json = self.api.method(
-                method='wall.search', values={
-                    'owner_id': owner.domain, 'query': self.query, 'count': count, 'offset': offset
-                }
-            )
-            print(owner.domain, 'Post count: ', len(wall_json['items']))
-            with self.lock:
-                self.queue.put({'owner': owner, 'wall_json': wall_json})
+            self.logger.info(f'Search - {owner}')
+            param = {
+                'domain': owner.domain,
+                'query': self.query,
+                'count': count,
+                'offset': offset,
+                'v': AppConfig.get_vk_api_version()
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url=self.api_url, params=param, headers=self.headers) as response:
+                    wall_json = await response.json()
+            self.logger.info(f"Post count - {owner}: {len(wall_json['response']['items'])}")
+            self.queue.put({'owner': owner, 'wall_json': wall_json['response']})
         except VkApiError as e:
             with self.lock:
                 owner.is_active = False
                 self.active_owners -= 1
-                print(f"Deactivate {owner}: {str(e)}")
+                self.logger.error(f"Deactivate - {owner}: {str(e)}")
 
-    def search_owner_wall(self, count=None, offset=None) -> None:
+    async def search_owner_wall(self, count=None, offset=None) -> None:
         """
 
         """
         if self.active_owners == 0:
             self.queue.put(None)
-        threads = []
+        foo_list = []
         for owner in self.search_owners:
             if owner.is_active:
-                threads.append(Thread(target=self.search_owner_posts, args=(owner, count, offset)))
-        threads_count = len(threads)
-        for thread in threads:
-            thread.start()
-            threads_count -= 1
-            if threads_count == 0:
-                thread.join()
+                foo_list.append(self.search_owner_posts(owner, count, offset))
+        await asyncio.gather(*foo_list)
 
     def check_wall(self, owner: SearchOwner, wall: dict, count: int):
         """
@@ -197,12 +215,12 @@ class ApiParser:
         if wall['count'] == 0:
             owner.is_active = False
             self.active_owners -= 1
-            print(f"Deactivate {owner}: no posts")
+            self.logger.info(f"Deactivate - {owner}: no posts")
         else:
             if wall['count'] < count:
                 owner.is_active = False
                 self.active_owners -= 1
-                print(f"Deactivate {owner}: post count < {count}")
+                self.logger.info(f"Deactivate - {owner}: post count < {count}")
 
     def prepare_text(self, source: str) -> str:
         """
@@ -242,7 +260,9 @@ class ApiParser:
                 if stop_date is not None and post['date'] < stop_date:
                     owner.is_active = False
                     self.active_owners -= 1
-                    print(f"Deactivate {owner}: post out of date {str(datetime.utcfromtimestamp(post['date']))}")
+                    self.logger.info(
+                        f"Deactivate - {owner}: post out of date {str(datetime.utcfromtimestamp(post['date']))}"
+                    )
                 else:
                     post_obj = self.create_post(post)
                     if post_obj is not None:
@@ -252,8 +272,7 @@ class ApiParser:
                             self.post_history_process(post['copy_history'])
                         self.posts.append(post_obj)
                         post_count += 1
-            print('Created posts: ', post_count)
-            print()
+            self.logger.info(f"Created posts - {owner}: {post_count}")
 
     def create_post(self, post: dict) -> Post:
         """
