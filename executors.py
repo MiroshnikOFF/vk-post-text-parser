@@ -1,10 +1,7 @@
 from datetime import datetime
 from queue import Queue
-from threading import Thread, Lock
-import asyncio
-import aiohttp
 
-from vk_api.exceptions import VkApiError
+from vk_api.exceptions import ApiError, ApiHttpError
 import vk_api
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -18,10 +15,14 @@ class SearchOwner:
     """
 
     """
-    def __init__(self, _id: int, domain: str):
+    def __init__(self, _id: int, domain: str, _type: str, first_name: str, is_closed: bool, last_name=None):
         self.id = _id
         self.domain = domain
-        self.is_active = True
+        self.type = _type,
+        self.first_name = first_name,
+        self.last_name = last_name
+        self.is_closed = is_closed
+        self.is_active = not is_closed
 
     def __repr__(self):
         return f'Owner: {self.id}_{self.domain}'
@@ -38,25 +39,23 @@ class ApiParser:
         self.api_url = 'https://api.vk.com/method/wall.search'
         self.headers = self.get_headers()
         self.queue = queue
-        self.lock = Lock()
-
         self.version = version
         self.token = token
-
         self.api = vk_api.VkApi(token=token, api_version=version)
-
         self.loader = DataExecutor()
         self.query = query
         self.query_id = self.loader.get_query_id(self.query)
-        self.search_owners = self.loader.get_search_owners()
+        self.search_owners = []
         self.post_ids = self.loader.select_ids(Post)
         self.photo_ids = self.loader.select_ids(Photo)
         self.video_ids = self.loader.select_ids(Video)
-        self.active_owners = len(self.search_owners)
+        self.active_owners = 0
         self.posts = []
         self.ext_user_ids = []
         self.ext_group_ids = []
-        self.ext_posts = []
+        self.owners = []
+        self.owner_ids = []
+        # self.posts_count = 0
 
     @staticmethod
     def get_headers():
@@ -76,17 +75,6 @@ class ApiParser:
         """
         source = [str(el) for el in source]
         return ', '.join(source)
-
-    def create_owners(self, user_ids=None, group_ids=None) -> list[Owner]:
-        """
-
-        """
-        owners_obj_list = []
-        if user_ids:
-            owners_obj_list.extend(self.create_users(user_ids))
-        if group_ids:
-            owners_obj_list.extend(self.create_groups(group_ids))
-        return owners_obj_list
 
     def check_owner_exists(self, owner_id) -> bool:
         """
@@ -109,104 +97,164 @@ class ApiParser:
         message = message + f' deactivated: {deactivated}' if deactivated is not None else message
         self.logger.info(message)
 
-    def create_users(self, user_ids: list) -> list[Owner]:
+    def get_vk_owners(self, user_ids: list, group_ids: list) -> dict:
         """
 
         """
-        users_json = self.api.method(
-            method='users.get', values={'user_ids': self.convert_list_to_str(user_ids), 'fields': 'domain'}
-        )
-        user_obj_list = []
-        for user in users_json:
-            is_exists = self.check_owner_exists(user['id'])
-            if any([
-                is_exists,
-                bool(user['is_closed']),
-                'deactivated' in user.keys()
-            ]):
-                self.get_error_message(user, 'User', is_exists)
-            else:
-                user_obj_list.append(
-                    Owner(
-                        id=user['id'],
-                        domain=user['domain'],
-                        type='user',
-                        url=self.domain + user['domain'],
-                        first_name=user['first_name'],
-                        last_name=user['last_name']
-                    )
-                )
-                owner = SearchOwner(user['id'], user['domain'])
-                self.search_owners.append(owner)
-                self.active_owners += 1
-        return user_obj_list
+        code = ('return [API.users.get({"user_ids": ' +
+                str(user_ids) +
+                ', "fields": "domain"}), API.groups.getById({"group_ids": ' +
+                str(group_ids) +
+                '})];')
+        owners_json = self.api.method(method='execute', values={'code': code})
+        return owners_json
 
-    def create_groups(self, group_ids: list) -> list[Owner]:
+    def add_search_owners(self, user_ids=None, group_ids=None) -> None:
         """
 
         """
-        groups_json = self.api.method(
-            method='groups.getById', values={'group_ids': self.convert_list_to_str(group_ids)}
-        )['groups']
-        group_obj_list = []
-        for group in groups_json:
-            is_exists = self.check_owner_exists(-group['id'])
-            if any([
-                is_exists,
-                bool(group['is_closed']),
-                'deactivated' in group.keys()
-            ]):
-                self.get_error_message(group, 'Group', is_exists)
-            else:
-                group_obj_list.append(
-                    Owner(
-                        id=-group['id'],
-                        domain=group['screen_name'],
-                        type='group',
-                        url=self.domain + group['screen_name'],
-                        name=group['name'],
-                    )
-                )
-                owner = SearchOwner(group['id'], group['screen_name'])
-                self.search_owners.append(owner)
-                self.active_owners += 1
-        return group_obj_list
-
-    async def search_owner_posts(self, owner: SearchOwner, count: int, offset: int) -> None:
-        """
-
-        """
-        try:
-            self.logger.info(f'Search - {owner}')
-            param = {
-                'domain': owner.domain,
-                'query': self.query,
-                'count': count,
-                'offset': offset,
-                'v': AppConfig.get_vk_api_version()
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url=self.api_url, params=param, headers=self.headers) as response:
-                    wall_json = await response.json()
-            self.logger.info(f"Post count - {owner}: {len(wall_json['response']['items'])}")
-            self.queue.put({'owner': owner, 'wall_json': wall_json['response']})
-        except VkApiError as e:
-            with self.lock:
-                owner.is_active = False
-                self.active_owners -= 1
-                self.logger.error(f"Deactivate - {owner}: {str(e)}")
-
-    async def search_owner_wall(self, count=None, offset=None) -> None:
-        """
-
-        """
-        if self.active_owners == 0:
-            self.queue.put(None)
-        foo_list = []
+        owners_exists = self.loader.get_owners()
+        if user_ids is None and group_ids is None:
+            self.search_owners = owners_exists
+        else:
+            vk_owners_json = self.get_vk_owners(user_ids, group_ids)
+            self.search_owners = list(set(self.create_users(vk_owners_json[0]) +
+                                          self.create_groups(vk_owners_json[1]['groups']) +
+                                          owners_exists))
         for owner in self.search_owners:
             if owner.is_active:
-                foo_list.append(self.search_owner_posts(owner, count, offset))
-        await asyncio.gather(*foo_list)
+                self.active_owners += 1
+
+    def create_users(self, users_json: dict) -> list[SearchOwner]:
+        """
+
+        """
+        search_users = []
+        for user in users_json:
+            is_exists = self.check_owner_exists(user['id'])
+            is_closed = bool(user['is_closed']) or 'deactivated' in user.keys()
+            if not is_exists:
+                search_user = SearchOwner(
+                        _id=user['id'],
+                        domain=user['domain'],
+                        _type='user',
+                        first_name=user['first_name'],
+                        last_name=user['last_name'],
+                        is_closed=is_closed
+                    )
+                if is_closed:
+                    self.get_error_message(user, 'User', is_exists)
+                    search_user.is_active = False
+                search_users.append(search_user)
+        return search_users
+
+    def create_groups(self, groups_json: dict) -> list[SearchOwner]:
+        """
+
+        """
+        search_groups = []
+        for group in groups_json:
+            is_exists = self.check_owner_exists(-group['id'])
+            is_closed = bool(group['is_closed']) or 'deactivated' in group.keys()
+            if not is_exists:
+                search_group = SearchOwner(
+                        _id=-group['id'],
+                        domain=group['screen_name'],
+                        _type='group',
+                        first_name=group['name'],
+                        is_closed=is_closed
+                    )
+                if is_closed:
+                    self.get_error_message(group, 'Group', is_exists)
+                    search_group.is_active = False
+                search_groups.append(search_group)
+        return search_groups
+
+    def create_owners(self) -> None:
+        """
+
+        """
+        exists_owner_ids = self.loader.get_owner_ids()
+        for owner in self.search_owners:
+            if owner.id not in exists_owner_ids and owner.id not in self.owner_ids:
+                self.owners.append(
+                    Owner(
+                        id=owner.id,
+                        domain=owner.domain,
+                        type=owner.type,
+                        url=self.domain + owner.domain,
+                        name=owner.first_name if owner.last_name is None else None,
+                        first_name=owner.first_name if owner.last_name is not None else None,
+                        last_name=owner.last_name,
+                        is_closed=owner.is_closed
+                    )
+                )
+                self.owner_ids.append(owner.id)
+
+    def ran_search_owner_wall(self, count=None, offset=None) -> None:
+        """
+
+        """
+        attempts = 1
+        stack = [self.search_owners]
+        while stack:
+            current_list = stack.pop()
+            try:
+                if self.active_owners > 0:
+                    self.search_owner_wall(current_list, count, offset)
+                else:
+                    self.queue.put(None)
+                    break
+            except ApiError as e:
+                attempts += 1
+                self.logger.error(f"Api error: {e}. Try: {attempts}")
+                mid_index = len(current_list) // 2
+                stack.append(current_list[:mid_index])
+                stack.append(current_list[mid_index:])
+
+    def search_owner_wall(self, search_owners: list[SearchOwner], count, offset) -> None:
+        """
+
+        """
+        owner_walls = {}
+        code_list = []
+        for owner in search_owners:
+            if owner.is_active:
+                code_list.append(
+                    ('API.wall.search({"domain": "' + owner.domain +
+                     '", "query": "' + self.query +
+                     '", "count": ' + str(count) +
+                     ', "offset": ' + str(offset) +
+                     '})')
+                )
+                owner_walls[owner] = None
+        code = 'return ' + str(code_list).replace("'", "") + ';'
+        attempts = 1
+        while True:
+            try:
+                walls_json = self.api.method(method='execute', values={'code': code})
+                owner_walls.update(dict(zip(owner_walls.keys(), walls_json)))
+                self.put_owner_posts(owner_walls)
+                break
+            except ApiHttpError as e:
+                attempts += 1
+                self.logger.error(f"ApiHttpError: {e}. Try: {attempts}")
+
+    def put_owner_posts(self, owner_walls: dict) -> None:
+        """
+
+        """
+        for owner, wall in owner_walls.items():
+            self.logger.info(f'Search - {owner}')
+            if isinstance(wall, dict):
+                if 'error' in wall.keys():
+                    error = wall['error']
+                    self.logger.error(f"Error {error['error_code']}: {error['error_msg']}")
+                    owner.is_active = False
+                    self.active_owners -= 1
+                else:
+                    self.logger.info(f"Post count - {owner}: {wall['count']}")
+                    self.queue.put({'owner': owner, 'wall_json': wall})
 
     def check_wall(self, owner: SearchOwner, wall: dict, count: int):
         """
@@ -216,11 +264,10 @@ class ApiParser:
             owner.is_active = False
             self.active_owners -= 1
             self.logger.info(f"Deactivate - {owner}: no posts")
-        else:
-            if wall['count'] < count:
-                owner.is_active = False
-                self.active_owners -= 1
-                self.logger.info(f"Deactivate - {owner}: post count < {count}")
+        elif wall['count'] < count:
+            owner.is_active = False
+            self.active_owners -= 1
+            self.logger.info(f"Deactivate - {owner}: post count < {count}")
 
     def prepare_text(self, source: str) -> str:
         """
@@ -305,26 +352,17 @@ class ApiParser:
 
         """
         if attachments:
-            # links_count = 0
-            # photos_count = 0
-            # videos_count = 0
             for attachment in attachments:
                 if attachment['type'] == 'link':
                     post.links.append(self.create_link_obj(attachment['link']))
-                    # links_count += 1
                 elif attachment['type'] == 'photo':
                     photo = self.create_photo_obj(attachment['photo'])
                     if photo is not None:
                         post.photos.append(photo)
-                        # photos_count += 1
                 elif attachment['type'] == 'video':
                     video = self.create_video_obj(attachment['video'])
                     if video is not None:
                         post.videos.append(video)
-                        # videos_count += 1
-            # print('Created links: ', links_count)
-            # print('Created photos: ', photos_count)
-            # print('Created videos: ', videos_count)
 
     def create_link_obj(self, attachment: dict) -> Link:
         """
@@ -380,12 +418,11 @@ class ApiParser:
         for post in posts:
             post_obj = self.create_post(post)
             if post_obj is not None:
-                post_obj.owner_id = post['owner_id']
                 if not self.check_owner_exists(post['owner_id']):
                     self.add_owner_id(post['owner_id'])
                 if 'attachments' in post.keys():
                     self.set_post_attachments(post_obj, post['attachments'])
-                self.ext_posts.append(post_obj)
+                self.posts.append(post_obj)
 
     def add_owner_id(self, owner_id: int) -> None:
         """
@@ -403,6 +440,27 @@ class ApiParser:
         """
         max_size = max(sizes, key=lambda x: x['width'])
         return max_size['url']
+
+    def run(self, user_ids=None, group_ids=None):
+        self.add_search_owners(user_ids, group_ids)
+        _offset = 0
+        while True:
+            iter_cnt = 1
+            while self.active_owners > 0:
+                self.logger.info(f'\n\nIter: {iter_cnt}  Active owners: {self.active_owners}\n')
+                self.ran_search_owner_wall(100, _offset)
+                _offset += 100
+                iter_cnt += 1
+                self.create_owners()
+            if self.ext_user_ids or self.ext_group_ids:
+                # print(f"{list(set(self.ext_user_ids))=}")
+                # print(f"{list(set(self.ext_group_ids))=}")
+                self.add_search_owners(list(set(self.ext_user_ids)), list(set(self.ext_group_ids)))
+                self.ext_group_ids = []
+                self.ext_user_ids = []
+            else:
+                self.queue.put(None)
+                break
 
 
 class DataExecutor:
@@ -443,18 +501,37 @@ class DataExecutor:
                 return [tpl[0] for tpl in result]
             return []
 
-    def get_search_owners(self) -> list[SearchOwner]:
+    def get_owner_ids(self) -> list[int]:
         """
 
         """
         with self.factory() as session:
-            query = select(Owner.id, Owner.domain)
+            query = select(Owner.id)
+            result = session.execute(query).all()
+            if result:
+                return [row[0] for row in result]
+            return []
+
+    def get_owners(self) -> list[SearchOwner]:
+        """
+
+        """
+        with self.factory() as session:
+            query = select(Owner)
             result = session.execute(query).all()
             owners = []
             if result:
-                for tpl in result:
-                    owner = SearchOwner(tpl[0], tpl[1])
-                    owners.append(owner)
+                for row in result:
+                    owners.append(
+                        SearchOwner(
+                            _id=row[0].id,
+                            domain=row[0].domain,
+                            _type=row[0].type,
+                            first_name=row[0].first_name,
+                            last_name=row[0].last_name,
+                            is_closed=row[0].is_closed
+                        )
+                    )
             return owners
 
     def export_data(self, data: list) -> None:

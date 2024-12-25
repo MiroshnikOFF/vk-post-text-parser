@@ -23,6 +23,7 @@ class Owner(Base):
     name: Mapped[str | None]
     first_name: Mapped[str | None]
     last_name: Mapped[str | None]
+    is_closed: Mapped[bool]
     posts: Mapped[list['Post']] = relationship(back_populates='owner', uselist=True)
 
     def __repr__(self) -> str:

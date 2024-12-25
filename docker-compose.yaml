@@ -1,0 +1,28 @@
+version: '3.5'
+
+services:
+
+  parser:
+    image: parser
+    container_name: vk_parser
+    env_file:
+      - .env
+    ports:
+      - '18100:18100'
+    restart: unless-stopped
+
+
+
+
+
+
+
+
+
+        #    build: .
+#    tty: true
+#    ports:
+#      - '8000:8000'
+
+#volumes:
+#  pg_data:

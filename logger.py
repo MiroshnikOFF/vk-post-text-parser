@@ -165,3 +165,22 @@ class ParserLogger(Logger):
         """
         return AppConfig.get_log_dir() + os.sep + 'log' + os.sep + 'parser'
 
+
+class APILogger(Logger):
+    """
+    Обеспечивает логирование на уровне API
+    """
+
+    @property
+    def logger_name(self):
+        """
+        Свойство, возвращает имя для логирования
+        """
+        return 'api_log'
+
+    @property
+    def log_folder(self):
+        """
+        Свойство, возвращает каталог для логирования
+        """
+        return AppConfig.get_log_dir() + os.sep + 'log' + os.sep + 'api'
